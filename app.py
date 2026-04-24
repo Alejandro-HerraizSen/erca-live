@@ -817,53 +817,67 @@ with tab6:
             alpha_h = st.slider("Hawkes α (excitation)", 0.0, 2.0, 0.5, 0.05)
             beta_h  = st.slider("Hawkes β (decay)",    0.1, 5.0, 1.0, 0.1)
 
-    # ── Build pipeline on real data ────────────────────────────────────────────
-    all_social   = score_batch(wsb_posts + st_posts, text_key="text")
-    all_news_sc  = score_batch(news_items, text_key="text")
+    # ── Build pipeline on real data (ERCA Algorithm 1) ────────────────────────
+    all_social  = score_batch(wsb_posts + st_posts, text_key="text")
+    all_news_sc = score_batch(news_items, text_key="text")
 
-    # S_soc from LPA
-    lpa_sig = LatentProfileAnalysis(K=8)
-    for post in all_social:
-        lpa_sig.update(post["sentiment"])
-    S_soc_agg = lpa_sig.aggregate()
-
-    # S_off from news
+    # S_off: mean news sentiment (official channel)
     S_off_avg = float(np.mean([n["sentiment"] for n in all_news_sc])) if all_news_sc else 0.0
 
-    # IV gradient (approx from ATM options)
+    # IV gradient — approx from ATM options snapshot
     grad_iv = 0.0
     if not calls.empty and "iv" in calls.columns:
         atm_opts = calls[abs(calls["strike"] - price) < price * 0.05]["iv"].dropna()
         if len(atm_opts) >= 2:
             grad_iv = float(atm_opts.iloc[-1] - atm_opts.iloc[0])
 
-    # Price change (from history)
+    # ΔP — yesterday-to-today price return
     delta_P = 0.0
     if not price_hist.empty:
         close = price_hist["Close"].squeeze()
         if len(close) >= 2:
             delta_P = float((close.iloc[-1] - close.iloc[-2]) / (close.iloc[-2] + 1e-9))
 
-    # Z_short
+    # ── Sequential event loop (matches ERCA Algorithm 1 exactly) ──────────────
+    # Each social post is one event: update Hawkes → update LPA →
+    # get S̃_soc → compute Z_short → update Kelly with Z_short
+    lpa_sig  = LatentProfileAnalysis(K=8)
     detector = DivergenceDetector(theta1=theta1, theta2=theta2, gamma_thresh=gamma_thresh)
-    t_now = 0.0
+    kelly    = FractionalKelly(c=kelly_c, window=20)
+    hawkes_sig = HawkesProcess(mu=mu_h, alpha=alpha_h, beta=beta_h)
 
-    # Feed events sequentially
-    for i, post in enumerate(all_social[:50]):
-        t_now = i * 60.0  # simulate 1-minute inter-arrivals
-        z = detector.compute(S_soc=S_soc_agg * (i + 1) / (len(all_social) + 1),
-                             t=t_now, delta_P=delta_P, grad_iv=grad_iv)
+    posts_to_run = all_social[:60] if all_social else []
+    S_soc_agg = 0.0
+
+    for i, post in enumerate(posts_to_run):
+        t_now = float(i * 120)          # 2-min inter-arrival (seconds)
+
+        # Phase A: update Hawkes with new social event
+        hawkes_sig.update(t_now)
+
+        # Phase B: update LPA posterior with this post's VADER score
+        s_raw = post.get("sentiment", 0.0)
+        lpa_sig.update(s_raw)
+
+        # Phase C: get current LPA-weighted aggregate S̃_soc(t)
+        S_soc_agg = lpa_sig.aggregate()
+
+        # Phase D: compute Z_short(t) from evolving sentiment
+        z = detector.compute(
+            S_soc=S_soc_agg,
+            t=t_now,
+            delta_P=delta_P,
+            grad_iv=grad_iv,
+        )
+
+        # Phase E: update Kelly window with Z_short (not raw sentiment)
+        kelly.update(z=z)
 
     z_current = detector.current_z
     z_max     = detector.max_z
     n_signals = detector.n_signals
     firing    = detector.is_firing
-
-    # Kelly
-    kelly = FractionalKelly(c=kelly_c, window=20)
-    for i, post in enumerate(all_social[:50]):
-        kelly.update(z=abs(post["sentiment"]))
-    f_star = kelly.compute()
+    f_star    = kelly.compute()
 
     # ── Signal status ──────────────────────────────────────────────────────────
     sig_html = (
