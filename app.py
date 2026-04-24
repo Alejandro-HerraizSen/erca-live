@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
 
 import numpy as np
 import pandas as pd
@@ -151,7 +154,7 @@ with col_refresh:
 with col_ts:
     st.markdown(
         f"<div style='text-align:right;color:#5A6478;font-size:0.78rem;padding-top:8px;'>"
-        f"Last update: {datetime.now().strftime('%H:%M:%S')}</div>",
+        f"Last update: {datetime.now(ET).strftime('%H:%M:%S')} ET</div>",
         unsafe_allow_html=True,
     )
 
