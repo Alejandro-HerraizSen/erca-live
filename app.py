@@ -40,16 +40,16 @@ from data.edgar import get_8k_filings
 TICKERS = ["AAPL", "TSLA", "NVDA", "AMZN", "COIN"]
 
 TICKER_META = {
-    "AAPL": {"color": "#A8B5C7", "emoji": "🍎"},
-    "TSLA": {"color": "#E82127", "emoji": "⚡"},
-    "NVDA": {"color": "#76B900", "emoji": "🟢"},
-    "AMZN": {"color": "#FF9900", "emoji": "📦"},
-    "COIN": {"color": "#0052FF", "emoji": "🪙"},
+    "AAPL": {"color": "#A8B5C7"},
+    "TSLA": {"color": "#E82127"},
+    "NVDA": {"color": "#76B900"},
+    "AMZN": {"color": "#FF9900"},
+    "COIN": {"color": "#0052FF"},
 }
 
 st.set_page_config(
     page_title="ERCA Live",
-    page_icon="⚡",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -130,7 +130,7 @@ button[data-baseweb="tab"] { font-size: 0.88rem; }
 
 st.markdown("""
 <div class="erca-header">
-  <div class="erca-title">⚡ ERCA Live</div>
+  <div class="erca-title">ERCA Live</div>
   <div class="erca-sub">Earnings Call Risk &amp; Confidence Analyzer &nbsp;·&nbsp;
   Hawkes · LPA · Z<sub>short</sub> · Fractional Kelly &nbsp;·&nbsp;
   Penn State 2026 &nbsp;·&nbsp; 5 tickers · live data</div>
@@ -145,10 +145,10 @@ with col_tickers:
         TICKERS,
         horizontal=True,
         label_visibility="collapsed",
-        format_func=lambda t: f"{TICKER_META[t]['emoji']} {t}",
+        format_func=lambda t: t,
     )
 with col_refresh:
-    if st.button("🔄 Refresh", use_container_width=True):
+    if st.button("Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 with col_ts:
@@ -210,12 +210,12 @@ st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🎯 Dashboard",
-    "📊 Options Chain",
-    "🌋 IV Surface",
-    "📡 Social Radar",
-    "📰 News & EDGAR",
-    "⚡ ERCA Signal",
+    "Dashboard",
+    "Options Chain",
+    "IV Surface",
+    "Social Sentiment",
+    "News & Filings",
+    "ERCA Signal",
 ])
 
 
@@ -264,7 +264,7 @@ with tab1:
     # ── Right panel ────────────────────────────────────────────────────────────
     with right:
         # Earnings countdown
-        st.markdown("#### ⏱ Earnings Countdown")
+        st.markdown("#### Earnings Countdown")
         if next_e:
             days_to = (next_e - date.today()).days
             if days_to >= 0:
@@ -283,7 +283,7 @@ with tab1:
                         unsafe_allow_html=True)
 
         # P/C Ratio
-        st.markdown("#### 📐 Put/Call Ratio")
+        st.markdown("#### Put/Call Ratio")
         if not calls.empty and not puts.empty:
             c_vol = calls["volume"].fillna(0).sum()
             p_vol = puts["volume"].fillna(0).sum()
@@ -312,7 +312,7 @@ with tab1:
             st.plotly_chart(gauge, use_container_width=True)
 
         # Top OI strikes
-        st.markdown("#### 🎯 Highest Open Interest")
+        st.markdown("#### Highest Open Interest")
         if not calls.empty and not puts.empty:
             top_calls = calls.nlargest(3, "openInterest")[["strike", "openInterest", "iv"]].copy()
             top_puts  = puts.nlargest(3, "openInterest")[["strike", "openInterest", "iv"]].copy()
@@ -368,7 +368,7 @@ with tab1:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab2:
-    st.markdown("#### 📊 Options Chain")
+    st.markdown("#### Options Chain")
     if not exps:
         st.warning("No options data available.")
     else:
@@ -474,7 +474,7 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab3:
-    st.markdown("#### 🌋 Implied Volatility Surface")
+    st.markdown("#### Implied Volatility Surface")
     if all_opts.empty:
         st.warning("No multi-expiry options data available.")
     else:
@@ -539,7 +539,7 @@ with tab3:
             st.plotly_chart(fig4, use_container_width=True)
 
             # Heatmap view
-            with st.expander("📐 IV Heatmap (flat view)"):
+            with st.expander("IV Heatmap (flat view)"):
                 fig5 = go.Figure(go.Heatmap(
                     x=strike_grid, y=dte_grid, z=IV_grid,
                     colorscale=col_tab,
@@ -565,7 +565,7 @@ with tab3:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab4:
-    st.markdown("#### 📡 Social Sentiment Radar")
+    st.markdown("#### Social Sentiment Radar")
 
     all_posts = wsb_posts + st_posts
     all_posts = score_batch(all_posts, text_key="text")
@@ -608,7 +608,7 @@ with tab4:
             st.plotly_chart(gauge2, use_container_width=True)
 
         # ── Hawkes intensity from post timestamps ──────────────────────────────
-        st.markdown("#### 🔥 Hawkes Social Intensity λ(t)")
+        st.markdown("#### Hawkes Social Intensity λ(t)")
         if len(all_posts) >= 3:
             times_raw = []
             for p in all_posts:
@@ -642,7 +642,7 @@ with tab4:
 
                 fig_h.add_annotation(
                     text=f"Branching ratio n={hawkes.branching_ratio:.2f}  "
-                         f"{'⚠ Near-critical!' if hawkes.branching_ratio > 0.8 else '✓ Stationary'}",
+                         f"{'[Near-critical]' if hawkes.branching_ratio > 0.8 else '[Stationary]'}",
                     xref="paper", yref="paper", x=0.01, y=0.97,
                     showarrow=False, font=dict(color="#FFB300", size=11),
                     bgcolor="#161C2D", bordercolor="#1E2740",
@@ -658,7 +658,7 @@ with tab4:
                 st.plotly_chart(fig_h, use_container_width=True)
 
                 # LPA profile weights
-                st.markdown("#### 👥 LPA Profile Weights")
+                st.markdown("#### LPA Profile Weights")
                 lpa = LatentProfileAnalysis(K=8)
                 for p in all_posts:
                     lpa.update(p["sentiment"])
@@ -681,7 +681,7 @@ with tab4:
                 st.plotly_chart(fig_lpa, use_container_width=True)
 
         # ── Post feed ──────────────────────────────────────────────────────────
-        st.markdown(f"#### 💬 Latest Posts — {len(all_posts)} found")
+        st.markdown(f"#### Latest Posts — {len(all_posts)} found")
         col_filter, _ = st.columns([1, 3])
         with col_filter:
             show_only = st.selectbox("Filter", ["All", "Bullish", "Bearish", "Neutral"], key="post_filter")
@@ -711,7 +711,7 @@ with tab4:
               </div>
               <div class="post-meta">
                 {src} &nbsp;·&nbsp; {p.get('sentiment_label','—')} ({s:+.2f})
-                &nbsp;·&nbsp; 👍 {score_disp} &nbsp;·&nbsp; {created}
+                &nbsp;·&nbsp; Score: {score_disp} &nbsp;·&nbsp; {created}
               </div>
             </div>""", unsafe_allow_html=True)
 
@@ -721,7 +721,7 @@ with tab4:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab5:
-    st.markdown("#### 📰 News & Official Filings")
+    st.markdown("#### News & Official Filings")
 
     scored_news    = score_batch(news_items,  text_key="text")
     scored_filings = score_batch(filings,     text_key="text")
@@ -782,7 +782,7 @@ with tab5:
                 lnk = f'<a href="{url}" target="_blank" style="color:#00D4FF;">↗ View filing</a>' if url else ""
                 st.markdown(f"""
                 <div class="post-card">
-                  <div class="post-title">📄 {f['title'][:90]}</div>
+                  <div class="post-title">{f['title'][:90]}</div>
                   <div class="post-meta">
                     {f.get('date','')} &nbsp;·&nbsp; {f.get('source','SEC EDGAR')}
                     &nbsp;·&nbsp; {lnk}
@@ -795,7 +795,7 @@ with tab5:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab6:
-    st.markdown("#### ⚡ ERCA Signal Engine")
+    st.markdown("#### ERCA Signal Engine")
     st.markdown(
         "<div style='color:#5A6478;font-size:0.82rem;margin-bottom:16px;'>"
         "Live computation of Z<sub>short</sub>(t) · Hawkes · LPA · Fractional Kelly "
@@ -804,7 +804,7 @@ with tab6:
     )
 
     # ── Parameter panel ────────────────────────────────────────────────────────
-    with st.expander("⚙️ Model Parameters", expanded=False):
+    with st.expander("Model Parameters", expanded=False):
         pc1, pc2, pc3 = st.columns(3)
         with pc1:
             theta1 = st.slider("θ₁ (price weight)",    0.0, 3.0, 1.0, 0.1)
@@ -881,7 +881,7 @@ with tab6:
 
     # ── Signal status ──────────────────────────────────────────────────────────
     sig_html = (
-        '<span class="signal-fire">🚨 SIGNAL FIRING — Enter Short-Vol Position</span>'
+        '<span class="signal-fire">SIGNAL ACTIVE — Enter Short-Vol Position</span>'
         if firing else
         '<span class="signal-quiet">● Monitoring — No signal</span>'
     )
@@ -980,7 +980,7 @@ with tab6:
         ))
         if kelly.circuit_open:
             kelly_gauge.add_annotation(
-                text="🔴 CIRCUIT BREAKER OPEN",
+                text="CIRCUIT BREAKER OPEN",
                 xref="paper", yref="paper", x=0.5, y=0.05,
                 showarrow=False, font=dict(color="#D50000", size=12),
             )
@@ -991,7 +991,7 @@ with tab6:
         st.plotly_chart(kelly_gauge, use_container_width=True)
 
     # ── Optimal stopping summary ───────────────────────────────────────────────
-    st.markdown("#### 📐 Optimal Stopping Summary")
+    st.markdown("#### Optimal Stopping Summary")
     st.markdown(f"""
     <div style='background:#161C2D;border:1px solid #1E2740;border-radius:10px;padding:18px;'>
       <table style='width:100%;color:#E8EDF5;font-size:0.88rem;'>
@@ -1009,14 +1009,14 @@ with tab6:
             <td style='color:{"#D50000" if kelly.circuit_open else "#00C853"};'>{"OPEN — trading halted" if kelly.circuit_open else "CLOSED — normal"}</td></tr>
         <tr><td style='color:#5A6478;'>Branching ratio n</td>
             <td>{mu_h:.2f} / {beta_h:.2f} = {alpha_h/beta_h:.3f}
-            {"⚠ Near-critical" if alpha_h/beta_h > 0.8 else "✓ Stationary"}</td></tr>
+            {"[Near-critical]" if alpha_h/beta_h > 0.8 else "[Stationary]"}</td></tr>
       </table>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div style='margin-top:12px;color:#5A6478;font-size:0.75rem;'>
-    ⚠️ <b>Research purposes only.</b> This tool validates the ERCA signal detection mechanism
+    <b>Research purposes only.</b> This tool validates the ERCA signal detection mechanism
     (Spearman ρ=0.4773, p&lt;0.0001 on 500 S&P 500 events). Full monetisation requires
     historical IV data from a paid options feed. Not investment advice.
     </div>""", unsafe_allow_html=True)
