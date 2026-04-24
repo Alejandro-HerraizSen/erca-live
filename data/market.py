@@ -29,25 +29,50 @@ def get_stock_info(ticker: str) -> dict:
     """Current snapshot: price, change, volume, fundamentals."""
     try:
         t = yf.Ticker(ticker)
-        info = t.info
+
+        # fast_info is the reliable price source in recent yfinance versions
         fast = t.fast_info
-        price = _safe_get(info, "currentPrice", "regularMarketPrice") or float(fast.last_price or 0)
-        prev  = _safe_get(info, "previousClose", "regularMarketPreviousClose") or float(fast.previous_close or price)
+        price = float(fast.last_price or 0)
+        prev  = float(fast.previous_close or price)
+
+        # Supplement with .info for fundamentals (may be empty / rate-limited)
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+
+        # Ultimate price fallback: last close from 5-day history
+        if price == 0:
+            hist = yf.download(ticker, period="5d", progress=False, auto_adjust=True)
+            if not hist.empty:
+                close = hist["Close"].squeeze()
+                price = float(close.iloc[-1])
+                prev  = float(close.iloc[-2]) if len(close) >= 2 else price
+
         change_pct = ((price - prev) / prev * 100) if prev else 0.0
+
+        # Volume: prefer fast_info (always populated), fall back to info
+        volume    = int(fast.last_volume or 0) or int(info.get("regularMarketVolume") or 0)
+        avg_vol   = int(getattr(fast, "three_month_average_volume", None) or
+                        info.get("averageVolume") or 0)
+        mkt_cap   = float(getattr(fast, "market_cap", None) or info.get("marketCap") or 0)
+        high_52w  = float(getattr(fast, "year_high", None) or info.get("fiftyTwoWeekHigh") or 0)
+        low_52w   = float(getattr(fast, "year_low",  None) or info.get("fiftyTwoWeekLow")  or 0)
+
         return {
-            "ticker": ticker,
-            "name":        info.get("longName", ticker),
+            "ticker":      ticker,
+            "name":        info.get("longName") or info.get("shortName") or ticker,
             "sector":      info.get("sector", "—"),
             "price":       price,
             "prev_close":  prev,
             "change_pct":  change_pct,
-            "volume":      _safe_get(info, "regularMarketVolume", default=0),
-            "avg_volume":  _safe_get(info, "averageVolume", default=0),
-            "market_cap":  info.get("marketCap", 0),
+            "volume":      volume,
+            "avg_volume":  avg_vol,
+            "market_cap":  mkt_cap,
             "pe_ratio":    info.get("trailingPE"),
             "beta":        info.get("beta"),
-            "52w_high":    info.get("fiftyTwoWeekHigh", 0),
-            "52w_low":     info.get("fiftyTwoWeekLow", 0),
+            "52w_high":    high_52w,
+            "52w_low":     low_52w,
             "short_ratio": info.get("shortRatio"),
             "short_float": info.get("shortPercentOfFloat"),
             "description": info.get("longBusinessSummary", ""),
