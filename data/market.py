@@ -4,12 +4,37 @@ All functions are cache-safe and return plain Python / pandas objects.
 """
 
 from __future__ import annotations
+import time
+import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
 from typing import Optional
 import streamlit as st
+
+
+# ── Shared requests session with browser-like headers ─────────────────────────
+# Yahoo Finance aggressively rate-limits bare Python user-agents on cloud IPs.
+# A realistic UA + cookie consent header prevents most rejections.
+
+def _yf_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    })
+    return s
+
+
+def _ticker(sym: str) -> yf.Ticker:
+    return yf.Ticker(sym, session=_yf_session())
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -28,7 +53,7 @@ def _safe_get(d: dict, *keys, default=None):
 def get_stock_info(ticker: str) -> dict:
     """Current snapshot: price, change, volume, fundamentals."""
     try:
-        t = yf.Ticker(ticker)
+        t = _ticker(ticker)
 
         # fast_info is the reliable price source in recent yfinance versions
         fast = t.fast_info
@@ -87,7 +112,8 @@ def get_stock_info(ticker: str) -> dict:
 def get_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
     """OHLCV history."""
     try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        df = yf.download(ticker, period=period, progress=False, auto_adjust=True,
+                         session=_yf_session())
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         return df
     except Exception:
@@ -100,7 +126,7 @@ def get_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
 def get_earnings_info(ticker: str) -> dict:
     """Next/last earnings date, EPS surprise history."""
     try:
-        t = yf.Ticker(ticker)
+        t = _ticker(ticker)
         cal = t.calendar
         next_earnings: Optional[date] = None
         if cal is not None:
@@ -120,23 +146,37 @@ def get_earnings_info(ticker: str) -> dict:
 
 # ── Options ────────────────────────────────────────────────────────────────────
 
+def _fetch_options_expiries(ticker: str, retries: int = 3) -> tuple[yf.Ticker, list[str]]:
+    """Return (Ticker, expiry_list) with retry on empty result."""
+    for attempt in range(retries):
+        try:
+            t = _ticker(ticker)
+            exps = list(t.options or [])
+            if exps:
+                return t, exps
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    return _ticker(ticker), []
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_options_chain(ticker: str, expiry: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
     Returns (calls_df, puts_df, all_expiries).
-    Each df has: strike, lastPrice, bid, ask, impliedVolatility,
-                 delta (approx), volume, openInterest, inTheMoney
+    Columns include: strike, lastPrice, bid, ask, iv,
+                     volume, openInterest, inTheMoney
     """
     try:
-        t = yf.Ticker(ticker)
-        exps = list(t.options)
+        t, exps = _fetch_options_expiries(ticker)
         if not exps:
             return pd.DataFrame(), pd.DataFrame(), []
         if expiry is None or expiry not in exps:
             expiry = exps[0]
         chain = t.option_chain(expiry)
         calls, puts = chain.calls.copy(), chain.puts.copy()
-        # Rename for consistency
         for df in (calls, puts):
             df.rename(columns={"impliedVolatility": "iv"}, inplace=True)
         return calls, puts, exps
@@ -148,11 +188,11 @@ def get_options_chain(ticker: str, expiry: str | None = None) -> tuple[pd.DataFr
 def get_all_options(ticker: str) -> pd.DataFrame:
     """
     Fetch options across up to 8 expiries — used for IV surface.
-    Returns DataFrame: expiry, days_to_exp, strike, type, iv, volume, oi
+    Returns DataFrame with columns: expiry, dte, strike, type, iv, volume, oi
     """
     try:
-        t = yf.Ticker(ticker)
-        exps = list(t.options)[:8]
+        t, exps = _fetch_options_expiries(ticker)
+        exps = exps[:8]
         rows = []
         today = date.today()
         for exp in exps:
@@ -176,6 +216,7 @@ def get_all_options(ticker: str) -> pd.DataFrame:
                         "volume": row.get("volume", 0) or 0,
                         "oi": row.get("openInterest", 0) or 0,
                     })
+                time.sleep(0.3)   # be polite between expiry fetches
             except Exception:
                 continue
         return pd.DataFrame(rows) if rows else pd.DataFrame()
@@ -189,7 +230,7 @@ def get_all_options(ticker: str) -> pd.DataFrame:
 def get_news(ticker: str, limit: int = 20) -> list[dict]:
     """Yahoo Finance news items for ticker."""
     try:
-        t = yf.Ticker(ticker)
+        t = _ticker(ticker)
         items = t.news or []
         out = []
         for item in items[:limit]:
