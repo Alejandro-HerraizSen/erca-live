@@ -5,7 +5,6 @@ All functions are cache-safe and return plain Python / pandas objects.
 
 from __future__ import annotations
 import time
-import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -14,27 +13,13 @@ from typing import Optional
 import streamlit as st
 
 
-# ── Shared requests session with browser-like headers ─────────────────────────
-# Yahoo Finance aggressively rate-limits bare Python user-agents on cloud IPs.
-# A realistic UA + cookie consent header prevents most rejections.
-
-def _yf_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-    })
-    return s
-
+# NOTE: Do NOT pass a requests.Session to yf.Ticker or yf.download.
+# yfinance ≥ 0.2.50 uses curl_cffi internally and rejects requests.Session
+# objects — doing so silently returns empty data for options, news, and
+# price history.  Let yfinance manage its own transport.
 
 def _ticker(sym: str) -> yf.Ticker:
-    return yf.Ticker(sym, session=_yf_session())
+    return yf.Ticker(sym)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
