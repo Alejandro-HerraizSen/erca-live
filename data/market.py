@@ -227,31 +227,78 @@ def get_all_options(ticker: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_news(ticker: str, limit: int = 20) -> list[dict]:
-    """Yahoo Finance news items for ticker."""
+    """Yahoo Finance news items for ticker — handles all known yfinance formats."""
     try:
         t = _ticker(ticker)
-        items = t.news or []
+        raw = t.news
+        if not raw:
+            return []
+
         out = []
-        for item in items[:limit]:
-            content = item.get("content", {})
-            title = content.get("title") or item.get("title", "")
-            summary = content.get("summary") or ""
-            pub = content.get("pubDate") or item.get("providerPublishTime", 0)
-            if isinstance(pub, int):
-                pub = datetime.fromtimestamp(pub).strftime("%Y-%m-%d %H:%M")
+        for item in raw[:limit]:
+            if not isinstance(item, dict):
+                continue
+
+            # ── Format A: nested "content" dict (yfinance ≥ 0.2.50) ──────────
+            content = item.get("content") or {}
+            if not isinstance(content, dict):
+                content = {}
+
+            # title
+            title = (content.get("title")
+                     or item.get("title")
+                     or item.get("headline", ""))
+            if not title:
+                continue
+
+            # summary / body
+            summary = (content.get("summary")
+                       or content.get("description")
+                       or item.get("summary")
+                       or "")
+
+            # publication date
+            pub_raw = (content.get("pubDate")
+                       or content.get("publishedAt")
+                       or item.get("providerPublishTime")
+                       or item.get("published_at")
+                       or "")
+            if isinstance(pub_raw, (int, float)) and pub_raw > 1e9:
+                pub_str = datetime.fromtimestamp(pub_raw).strftime("%Y-%m-%d %H:%M")
+            elif isinstance(pub_raw, str) and pub_raw:
+                pub_str = pub_raw[:16].replace("T", " ")
+            else:
+                pub_str = ""
+
+            # URL — try several locations
             url = ""
-            clinks = content.get("canonicalUrl", {})
-            if isinstance(clinks, dict):
-                url = clinks.get("url", "")
+            canonical = content.get("canonicalUrl") or {}
+            if isinstance(canonical, dict):
+                url = canonical.get("url", "")
             if not url:
-                url = item.get("link", "")
+                url = (content.get("url")
+                       or item.get("link")
+                       or item.get("url")
+                       or "")
+
+            # publisher
+            publisher = ""
+            src = content.get("provider") or item.get("publisher") or {}
+            if isinstance(src, dict):
+                publisher = src.get("displayName") or src.get("name") or ""
+            elif isinstance(src, str):
+                publisher = src
+
             out.append({
-                "title": title,
-                "summary": summary,
-                "date": str(pub)[:16],
-                "url": url,
-                "text": f"{title}. {summary}",
+                "title":     str(title).strip(),
+                "summary":   str(summary).strip(),
+                "date":      pub_str[:16],
+                "url":       str(url).strip(),
+                "publisher": publisher,
+                "text":      f"{title}. {summary}",
             })
+
         return out
+
     except Exception:
         return []

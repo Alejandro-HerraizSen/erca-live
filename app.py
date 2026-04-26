@@ -766,11 +766,13 @@ with tab5:
                 clr = sentiment_color(s)
                 url = n.get("url", "")
                 lnk = f'<a href="{url}" target="_blank" style="color:#00D4FF;">↗</a>' if url else ""
+                pub = n.get("publisher", "")
+                pub_txt = f"&nbsp;·&nbsp; {pub}" if pub else ""
                 st.markdown(f"""
                 <div class="post-card">
                   <div class="post-title">{n['title'][:100]} {lnk}</div>
                   <div class="post-meta">
-                    {n.get('date','')} &nbsp;·&nbsp;
+                    {n.get('date','')}{pub_txt} &nbsp;·&nbsp;
                     <span style="color:{clr};">{n.get('sentiment_label','')}</span>
                     ({s:+.2f})
                   </div>
