@@ -1877,10 +1877,16 @@ with tab9:
                 line=dict(color="#FFB300", width=1.8),
                 fill="tozeroy", fillcolor="rgba(255,179,0,0.08)"))
             if len(train_dates) > 0:
-                fig_data.add_vline(x=str(train_dates[-1]),
-                    line=dict(color="#5A6478", dash="dash", width=1.5),
-                    annotation_text="Train | Test",
-                    annotation_font_color="#5A6478")
+                split_x = str(train_dates[-1])[:10]   # "YYYY-MM-DD"
+                fig_data.add_shape(type="line",
+                    x0=split_x, x1=split_x, y0=0, y1=1,
+                    xref="x", yref="paper",
+                    line=dict(color="#5A6478", dash="dash", width=1.5))
+                fig_data.add_annotation(
+                    x=split_x, y=1, xref="x", yref="paper",
+                    text="Train | Test", showarrow=False,
+                    font=dict(color="#5A6478", size=10),
+                    xanchor="left", yanchor="top")
             fig_data.update_layout(
                 template="plotly_dark", paper_bgcolor="#0E1117",
                 plot_bgcolor="#0E1117", height=200,
