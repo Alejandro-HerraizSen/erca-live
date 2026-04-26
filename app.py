@@ -22,7 +22,10 @@ import streamlit as st
 from scipy.interpolate import griddata
 
 # ── ERCA core ──────────────────────────────────────────────────────────────────
-from erca import HawkesProcess, LatentProfileAnalysis, DivergenceDetector, FractionalKelly
+from erca import (
+    HawkesProcess, LatentProfileAnalysis, DivergenceDetector, FractionalKelly,
+    SentimentJumpDiffusion, ERCAEnsemble, MODEL_NAMES,
+)
 
 # ── Data layer ─────────────────────────────────────────────────────────────────
 from data.market import (
@@ -793,87 +796,211 @@ with tab5:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — ERCA SIGNAL
+# TAB 6 — ERCA SIGNAL  (full 4-phase pipeline)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab6:
-    st.markdown("#### ERCA Signal Engine")
-    st.markdown(
-        "<div style='color:#5A6478;font-size:0.82rem;margin-bottom:16px;'>"
-        "Live computation of Z<sub>short</sub>(t) · Hawkes · LPA · Fractional Kelly "
-        "on real social + news data</div>",
-        unsafe_allow_html=True,
-    )
-
-    # ── Parameter panel ────────────────────────────────────────────────────────
-    with st.expander("Model Parameters", expanded=False):
+    # ── Global parameters ──────────────────────────────────────────────────────
+    with st.expander("Pipeline Parameters", expanded=False):
         pc1, pc2, pc3 = st.columns(3)
         with pc1:
-            theta1 = st.slider("θ₁ (price weight)",    0.0, 3.0, 1.0, 0.1)
-            theta2 = st.slider("θ₂ (IV grad weight)",  0.0, 3.0, 0.5, 0.1)
+            theta1       = st.slider("θ₁ (price weight)",      0.0, 3.0, 1.0, 0.1, key="s_t1")
+            theta2       = st.slider("θ₂ (IV grad weight)",    0.0, 3.0, 0.5, 0.1, key="s_t2")
         with pc2:
-            gamma_thresh = st.slider("Γ_thresh (signal threshold)", 0.01, 5.0, 0.5, 0.05)
-            kelly_c      = st.slider("Kelly fraction c",            0.05, 0.50, 0.25, 0.05)
+            gamma_thresh = st.slider("Γ_thresh",                0.001, 0.10, 0.008, 0.001, key="s_gam")
+            kelly_c      = st.slider("Kelly fraction c",        0.05, 0.50, 0.25, 0.05, key="s_kc")
         with pc3:
-            mu_h    = st.slider("Hawkes μ (baseline)", 0.01, 1.0, 0.1, 0.01)
-            alpha_h = st.slider("Hawkes α (excitation)", 0.0, 2.0, 0.5, 0.05)
-            beta_h  = st.slider("Hawkes β (decay)",    0.1, 5.0, 1.0, 0.1)
+            mu_h         = st.slider("Hawkes μ",               0.01, 1.0, 0.10, 0.01, key="s_mu")
+            alpha_h      = st.slider("Hawkes α",               0.0,  2.0, 0.50, 0.05, key="s_al")
+            beta_h       = st.slider("Hawkes β",               0.1,  5.0, 1.00, 0.10, key="s_be")
 
-    # ── Build pipeline on real data (ERCA Algorithm 1) ────────────────────────
+    # ── Pre-compute shared inputs ──────────────────────────────────────────────
     all_social  = score_batch(wsb_posts + st_posts, text_key="text")
-    all_news_sc = score_batch(news_items, text_key="text")
+    all_news_sc = score_batch(news_items,           text_key="text")
+    S_off_avg   = float(np.mean([n["sentiment"] for n in all_news_sc])) if all_news_sc else 0.0
 
-    # S_off: mean news sentiment (official channel)
-    S_off_avg = float(np.mean([n["sentiment"] for n in all_news_sc])) if all_news_sc else 0.0
-
-    # IV gradient — approx from ATM options snapshot
     grad_iv = 0.0
     if not calls.empty and "iv" in calls.columns:
         atm_opts = calls[abs(calls["strike"] - price) < price * 0.05]["iv"].dropna()
         if len(atm_opts) >= 2:
             grad_iv = float(atm_opts.iloc[-1] - atm_opts.iloc[0])
 
-    # ΔP — yesterday-to-today price return
     delta_P = 0.0
     if not price_hist.empty:
-        close = price_hist["Close"].squeeze()
-        if len(close) >= 2:
-            delta_P = float((close.iloc[-1] - close.iloc[-2]) / (close.iloc[-2] + 1e-9))
+        _c = price_hist["Close"].squeeze()
+        if len(_c) >= 2:
+            delta_P = float((_c.iloc[-1] - _c.iloc[-2]) / (_c.iloc[-2] + 1e-9))
 
-    # ── Sequential event loop (matches ERCA Algorithm 1 exactly) ──────────────
-    # Each social post is one event: update Hawkes → update LPA →
-    # get S̃_soc → compute Z_short → update Kelly with Z_short
-    lpa_sig  = LatentProfileAnalysis(K=8)
-    detector = DivergenceDetector(theta1=theta1, theta2=theta2, gamma_thresh=gamma_thresh)
-    kelly    = FractionalKelly(c=kelly_c, window=20)
+    # ══ PHASE A — DATA INGESTION & NLP ════════════════════════════════════════
+    st.markdown("""<div style='border-left:3px solid #00D4FF;padding-left:12px;
+        margin:18px 0 8px 0;font-size:0.95rem;font-weight:700;color:#E8EDF5;
+        letter-spacing:0.5px;'>PHASE A &nbsp;·&nbsp; DATA INGESTION &amp; NLP</div>""",
+        unsafe_allow_html=True)
+
+    pa1, pa2, pa3 = st.columns(3)
+    with pa1:
+        st.markdown(f"""<div class='metric-card'>
+          <div class='metric-label'>OPRA / Options feed</div>
+          <div class='metric-value'>{len(calls) + len(puts)}</div>
+          <div style='color:#5A6478;font-size:0.72rem;'>contracts loaded</div>
+        </div>""", unsafe_allow_html=True)
+    with pa2:
+        st.markdown(f"""<div class='metric-card'>
+          <div class='metric-label'>Earnings transcript (SEC 8-K)</div>
+          <div class='metric-value'>{len(filings)}</div>
+          <div style='color:{sentiment_color(S_off_avg)};font-size:0.72rem;'>
+            S_off = {S_off_avg:+.3f} &nbsp; (VADER compound)
+          </div>
+        </div>""", unsafe_allow_html=True)
+    with pa3:
+        st.markdown(f"""<div class='metric-card'>
+          <div class='metric-label'>Social media firehose</div>
+          <div class='metric-value'>{len(all_social)}</div>
+          <div style='color:#5A6478;font-size:0.72rem;'>
+            Reddit WSB · StockTwits · VADER+LPA
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    # FinBERT-style scoring breakdown (VADER as proxy, w=[1,0,−1]^T applied)
+    if all_social or all_news_sc:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        fa1, fa2 = st.columns(2)
+        with fa1:
+            st.markdown("**Official channel  —  FinBERT scores  (s_j^off)**")
+            if all_news_sc:
+                news_scores = [n["sentiment"] for n in all_news_sc]
+                # apply w=[pos,neu,neg] weighting: compound already ≈ pos−neg
+                fb_pos = sum(1 for s in news_scores if s > 0.05)
+                fb_neu = sum(1 for s in news_scores if -0.05 <= s <= 0.05)
+                fb_neg = sum(1 for s in news_scores if s < -0.05)
+                fig_fb = go.Figure(go.Bar(
+                    x=["Positive", "Neutral", "Negative"],
+                    y=[fb_pos, fb_neu, fb_neg],
+                    marker_color=["#00C853", "#FFB300", "#D50000"],
+                    text=[fb_pos, fb_neu, fb_neg], textposition="outside",
+                ))
+                fig_fb.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117", height=160, showlegend=False,
+                    margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis=dict(gridcolor="#1E2740"), xaxis=dict(gridcolor="#0E1117"))
+                st.plotly_chart(fig_fb, use_container_width=True)
+            else:
+                st.info("No news data.")
+        with fa2:
+            st.markdown("**Social channel  —  FinBERT+LPA  (s_u^soc)**")
+            if all_social:
+                soc_scores = [p["sentiment"] for p in all_social]
+                sb_pos = sum(1 for s in soc_scores if s > 0.05)
+                sb_neu = sum(1 for s in soc_scores if -0.05 <= s <= 0.05)
+                sb_neg = sum(1 for s in soc_scores if s < -0.05)
+                fig_sb = go.Figure(go.Bar(
+                    x=["Positive", "Neutral", "Negative"],
+                    y=[sb_pos, sb_neu, sb_neg],
+                    marker_color=["#00C853", "#FFB300", "#D50000"],
+                    text=[sb_pos, sb_neu, sb_neg], textposition="outside",
+                ))
+                fig_sb.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117", height=160, showlegend=False,
+                    margin=dict(l=0,r=0,t=10,b=0),
+                    yaxis=dict(gridcolor="#1E2740"), xaxis=dict(gridcolor="#0E1117"))
+                st.plotly_chart(fig_sb, use_container_width=True)
+            else:
+                st.info("No social data.")
+
+    # ══ PHASE B — STOCHASTIC STATE VARIABLES ══════════════════════════════════
+    st.markdown("""<div style='border-left:3px solid #7B61FF;padding-left:12px;
+        margin:18px 0 8px 0;font-size:0.95rem;font-weight:700;color:#E8EDF5;
+        letter-spacing:0.5px;'>PHASE B &nbsp;·&nbsp; STOCHASTIC STATE VARIABLES</div>""",
+        unsafe_allow_html=True)
+
+    # Run Hawkes + LPA sequentially on all posts
+    lpa_sig    = LatentProfileAnalysis(K=8)
+    detector   = DivergenceDetector(theta1=theta1, theta2=theta2, gamma_thresh=gamma_thresh)
+    kelly      = FractionalKelly(c=kelly_c, window=20)
     hawkes_sig = HawkesProcess(mu=mu_h, alpha=alpha_h, beta=beta_h)
 
     posts_to_run = all_social[:60] if all_social else []
-    S_soc_agg = 0.0
+    S_soc_agg    = 0.0
+    lam_history  = []
+    ssoc_history = []
 
     for i, post in enumerate(posts_to_run):
-        t_now = float(i * 120)          # 2-min inter-arrival (seconds)
-
-        # Phase A: update Hawkes with new social event
-        hawkes_sig.update(t_now)
-
-        # Phase B: update LPA posterior with this post's VADER score
-        s_raw = post.get("sentiment", 0.0)
-        lpa_sig.update(s_raw)
-
-        # Phase C: get current LPA-weighted aggregate S̃_soc(t)
+        t_now = float(i * 5)         # 5-min inter-arrival (minutes)
+        lam   = hawkes_sig.update(t_now)
+        lam_history.append(lam)
+        lpa_sig.update(post.get("sentiment", 0.0))
         S_soc_agg = lpa_sig.aggregate()
-
-        # Phase D: compute Z_short(t) from evolving sentiment
-        z = detector.compute(
-            S_soc=S_soc_agg,
-            t=t_now,
-            delta_P=delta_P,
-            grad_iv=grad_iv,
-        )
-
-        # Phase E: update Kelly window with Z_short (not raw sentiment)
+        ssoc_history.append(S_soc_agg)
+        z = detector.compute(S_soc=S_soc_agg, t=t_now,
+                             delta_P=delta_P, grad_iv=grad_iv)
         kelly.update(z=z)
+
+    # Build σ(t) path via SDE using Hawkes λ and LPA S̃_soc
+    n_sde   = max(len(lam_history), 30)
+    atm_iv  = 0.30
+    if not calls.empty and "iv" in calls.columns:
+        _atm = calls[abs(calls["strike"] - price) < price * 0.05]["iv"].dropna()
+        if len(_atm) > 0:
+            atm_iv = float(_atm.mean())
+
+    lam_arr  = np.array(lam_history) if lam_history else np.full(n_sde, mu_h)
+    ssoc_arr = np.array(ssoc_history) if ssoc_history else np.zeros(n_sde)
+    sde_obj  = SentimentJumpDiffusion(sigma_base=atm_iv, kappa=0.5, r_f=0.05)
+    sigma_path = sde_obj.iv_crush_path(lam_arr, ssoc_arr)
+    girsanov   = np.array([sde_obj.girsanov_drift(sde_obj.mu_t(S_off_avg), s) for s in sigma_path])
+    t_min      = np.arange(len(sigma_path)) * 5
+
+    pb1, pb2 = st.columns(2)
+    with pb1:
+        st.markdown("**Hawkes λ_soc(t)  +  S̃_soc(t)  (Market filtration)**")
+        fig_pb = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                               row_heights=[0.55, 0.45], vertical_spacing=0.05)
+        fig_pb.add_trace(go.Scatter(x=t_min, y=lam_arr, mode="lines",
+            name="λ_soc(t)", line=dict(color="#00D4FF", width=2),
+            fill="tozeroy", fillcolor="rgba(0,212,255,0.07)"), row=1, col=1)
+        fig_pb.add_hline(y=mu_h, line=dict(color="#5A6478", dash="dash", width=1),
+                         row=1, col=1)
+        fig_pb.add_trace(go.Scatter(x=t_min, y=ssoc_arr, mode="lines",
+            name="S̃_soc(t)", line=dict(color="#7B61FF", width=2),
+            fill="tozeroy", fillcolor="rgba(123,97,255,0.07)"), row=2, col=1)
+        fig_pb.add_hline(y=0, line=dict(color="#5A6478", width=1), row=2, col=1)
+        fig_pb.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=270, margin=dict(l=0,r=0,t=10,b=0),
+            legend=dict(orientation="h", y=1.12, font=dict(size=10)))
+        fig_pb.update_yaxes(title_text="λ_soc", row=1, col=1, gridcolor="#1E2740")
+        fig_pb.update_yaxes(title_text="S̃_soc", row=2, col=1, gridcolor="#1E2740")
+        fig_pb.update_xaxes(title_text="Time (min)", row=2, col=1, gridcolor="#1E2740")
+        st.plotly_chart(fig_pb, use_container_width=True)
+        st.caption(f"Virality ratio n = α/β = {alpha_h/beta_h:.3f}  ·  "
+                   f"{'[Near-critical]' if alpha_h/beta_h > 0.8 else '[Stationary]'}")
+
+    with pb2:
+        st.markdown("**Sentiment-Coupled Jump-Diffusion σ(t)**")
+        fig_sig = go.Figure()
+        fig_sig.add_trace(go.Scatter(x=t_min, y=sigma_path * 100, mode="lines",
+            name="σ(t) = σ_base + κ·ln(1+λ)·|S̃|",
+            line=dict(color="#FFB300", width=2),
+            fill="tozeroy", fillcolor="rgba(255,179,0,0.07)"))
+        fig_sig.add_hline(y=atm_iv * 100, line=dict(color="#5A6478", dash="dash", width=1),
+                          annotation_text=f"σ_base={atm_iv*100:.1f}%  (IV crush target)",
+                          annotation_font_color="#5A6478", annotation_position="top right")
+        fig_sig.add_trace(go.Scatter(x=t_min, y=girsanov, mode="lines",
+            name="Girsanov θ(t) = (μ−r_f)/σ",
+            line=dict(color="#00C853", width=1.5, dash="dot")))
+        fig_sig.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=270, margin=dict(l=0,r=0,t=10,b=0),
+            xaxis_title="Time (min)", yaxis_title="σ(t) %  /  θ(t)",
+            legend=dict(orientation="h", y=1.12, font=dict(size=10)),
+            xaxis=dict(gridcolor="#1E2740"), yaxis=dict(gridcolor="#1E2740"))
+        st.plotly_chart(fig_sig, use_container_width=True)
+        st.caption(f"σ_base={atm_iv*100:.1f}%  κ=0.5  ·  "
+                   f"σ_peak={sigma_path.max()*100:.1f}%  →  crush Δσ={abs(sigma_path.max()-atm_iv)*100:.1f}pp")
+
+    # ══ PHASE C — DIVERGENCE DETECTION ════════════════════════════════════════
+    st.markdown("""<div style='border-left:3px solid #FFB300;padding-left:12px;
+        margin:18px 0 8px 0;font-size:0.95rem;font-weight:700;color:#E8EDF5;
+        letter-spacing:0.5px;'>PHASE C &nbsp;·&nbsp; DIVERGENCE DETECTION</div>""",
+        unsafe_allow_html=True)
 
     z_current = detector.current_z
     z_max     = detector.max_z
@@ -881,146 +1008,185 @@ with tab6:
     firing    = detector.is_firing
     f_star    = kelly.compute()
 
-    # ── Signal status ──────────────────────────────────────────────────────────
     sig_html = (
-        '<span class="signal-fire">SIGNAL ACTIVE — Enter Short-Vol Position</span>'
+        '<span class="signal-fire">SIGNAL ACTIVE — Proceed to Phase D</span>'
         if firing else
-        '<span class="signal-quiet">● Monitoring — No signal</span>'
+        '<span class="signal-quiet">● Monitoring — No signal · back to Phase A</span>'
     )
     st.markdown(sig_html, unsafe_allow_html=True)
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # ── Key metrics row ────────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5 = st.columns(5)
-    _metric(m1, "Z_short (current)", f"{z_current:.3f}")
-    _metric(m2, "Z_short (max)",     f"{z_max:.3f}")
-    _metric(m3, "Signals fired",     str(n_signals))
-    _metric(m4, "Kelly f*(t)",       f"{f_star:.1%}")
-    _metric(m5, "S̃_soc agg",        f"{S_soc_agg:.3f}")
+    cm1, cm2, cm3, cm4, cm5 = st.columns(5)
+    _metric(cm1, "Z_short (now)",  f"{z_current:.4f}")
+    _metric(cm2, "Z_short (max)",  f"{z_max:.4f}")
+    _metric(cm3, "Signals fired",  str(n_signals))
+    _metric(cm4, "Γ threshold",    f"{gamma_thresh:.3f}")
+    _metric(cm5, "S̃_soc",         f"{S_soc_agg:.3f}")
 
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # ── Z_short timeline ───────────────────────────────────────────────────────
-    st.markdown("#### Z_short Timeline")
     t_arr, z_arr = detector.history_arrays()
     if len(z_arr) > 1:
         fig_z = go.Figure()
-        fig_z.add_trace(go.Scatter(
-            x=t_arr / 60, y=z_arr,
-            mode="lines", name="Z_short(t)",
+        fig_z.add_trace(go.Scatter(x=t_arr, y=z_arr, mode="lines", name="Z_short(t)",
             line=dict(color="#00D4FF", width=2),
-            fill="tozeroy", fillcolor="rgba(0,212,255,0.07)",
-        ))
-        # Threshold line
-        fig_z.add_hline(y=gamma_thresh, line=dict(color="#FFB300", dash="dash", width=1.5),
-                        annotation_text=f"Γ_thresh={gamma_thresh}",
-                        annotation_font_color="#FFB300", annotation_position="top left")
-        # Signal markers
-        signal_ts = [t for t, z in zip(t_arr, z_arr) if z > gamma_thresh]
-        signal_zs = [z for t, z in zip(t_arr, z_arr) if z > gamma_thresh]
-        if signal_ts:
-            fig_z.add_trace(go.Scatter(
-                x=np.array(signal_ts) / 60, y=signal_zs,
-                mode="markers", name="Signal",
-                marker=dict(color="#D50000", size=9, symbol="circle"),
-            ))
-        fig_z.update_layout(
-            template="plotly_dark", paper_bgcolor="#0E1117",
-            plot_bgcolor="#0E1117", height=280,
-            margin=dict(l=0, r=0, t=10, b=0),
-            xaxis_title="Time (minutes)", yaxis_title="Z_short(t)",
-            legend=dict(orientation="h", y=1.05),
-            xaxis=dict(gridcolor="#1E2740"),
-            yaxis=dict(gridcolor="#1E2740"),
-        )
+            fill="tozeroy", fillcolor="rgba(0,212,255,0.07)"))
+        fig_z.add_trace(go.Scatter(x=t_arr,
+            y=[sde_obj.sigma_t(float(hawkes_sig.intensity_at(t)), S_soc_agg) - atm_iv
+               for t in t_arr],
+            mode="lines", name="∇σ_IV proxy",
+            line=dict(color="#FFB300", width=1.5, dash="dot")))
+        fig_z.add_hline(y=gamma_thresh, line=dict(color="#D50000", dash="dash", width=1.5),
+                        annotation_text=f"Γ = {gamma_thresh}",
+                        annotation_font_color="#D50000", annotation_position="top left")
+        sig_mask = z_arr > gamma_thresh
+        if sig_mask.any():
+            fig_z.add_trace(go.Scatter(x=t_arr[sig_mask], y=z_arr[sig_mask],
+                mode="markers", name="Signal fired",
+                marker=dict(color="#D50000", size=10, symbol="circle")))
+        fig_z.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=240, margin=dict(l=0,r=0,t=10,b=0),
+            xaxis_title="Time (min)", yaxis_title="Z_short(t)",
+            legend=dict(orientation="h", y=1.12, font=dict(size=10)),
+            xaxis=dict(gridcolor="#1E2740"), yaxis=dict(gridcolor="#1E2740"))
         st.plotly_chart(fig_z, use_container_width=True)
 
-    # ── Kelly gauge ────────────────────────────────────────────────────────────
-    sig_col, kelly_col = st.columns(2)
+    # ══ PHASE D — DQN ENSEMBLE & EXECUTION ════════════════════════════════════
+    st.markdown("""<div style='border-left:3px solid #D50000;padding-left:12px;
+        margin:18px 0 8px 0;font-size:0.95rem;font-weight:700;color:#E8EDF5;
+        letter-spacing:0.5px;'>PHASE D &nbsp;·&nbsp; DQN ENSEMBLE &amp; EXECUTION</div>""",
+        unsafe_allow_html=True)
 
-    with sig_col:
-        st.markdown("#### Sentiment Channels")
-        ch_fig = go.Figure(go.Bar(
-            x=["S̃_soc (LPA-weighted)", "S_off (News avg)", "ΔP (price chg)", "∇σ_IV (IV grad)"],
-            y=[S_soc_agg, S_off_avg, delta_P, grad_iv],
-            marker_color=[sentiment_color(S_soc_agg), sentiment_color(S_off_avg),
-                          "#00C853" if delta_P >= 0 else "#D50000", "#9E9E9E"],
-            text=[f"{v:+.3f}" for v in [S_soc_agg, S_off_avg, delta_P, grad_iv]],
-            textposition="outside",
-        ))
-        ch_fig.update_layout(
-            template="plotly_dark", paper_bgcolor="#0E1117",
-            plot_bgcolor="#0E1117", height=260,
-            margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(gridcolor="#1E2740", title="Value"),
-            xaxis=dict(gridcolor="#0E1117"),
-            showlegend=False,
-        )
-        ch_fig.add_hline(y=0, line=dict(color="#5A6478", width=1))
-        st.plotly_chart(ch_fig, use_container_width=True)
+    # Build IV series for ensemble: ATM IV across all loaded expiries
+    iv_series_ens   = np.array([])
+    lam_series_ens  = np.array([])
 
-    with kelly_col:
-        st.markdown("#### Kelly f*(t)")
-        kelly_gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=round(f_star * 100, 2),
-            number={"suffix": "%", "font": {"size": 36, "color": "#00D4FF"}},
-            title={"text": f"Fractional Kelly (c={kelly_c})",
-                   "font": {"size": 12, "color": "#5A6478"}},
-            gauge={
-                "axis": {"range": [0, kelly_c * 100], "tickcolor": "#5A6478",
-                         "ticksuffix": "%"},
-                "bar":  {"color": "#00D4FF" if not kelly.circuit_open else "#D50000"},
-                "bgcolor": "#161C2D",
-                "bordercolor": "#1E2740",
-                "steps": [
-                    {"range": [0, kelly_c * 33],  "color": "rgba(0,200,83,0.10)"},
-                    {"range": [kelly_c*33, kelly_c*66], "color": "rgba(255,179,0,0.10)"},
-                    {"range": [kelly_c*66, kelly_c*100], "color": "rgba(213,0,0,0.10)"},
-                ],
-            },
-        ))
-        if kelly.circuit_open:
-            kelly_gauge.add_annotation(
-                text="CIRCUIT BREAKER OPEN",
-                xref="paper", yref="paper", x=0.5, y=0.05,
-                showarrow=False, font=dict(color="#D50000", size=12),
-            )
-        kelly_gauge.update_layout(
-            template="plotly_dark", paper_bgcolor="#0E1117",
-            height=260, margin=dict(l=30, r=30, t=30, b=10),
-        )
-        st.plotly_chart(kelly_gauge, use_container_width=True)
+    if not all_opts.empty and "iv" in all_opts.columns:
+        atm_band = all_opts[(all_opts["strike"] >= price * 0.97) &
+                            (all_opts["strike"] <= price * 1.03)]
+        if len(atm_band) >= 4:
+            iv_by_dte = atm_band.groupby("dte")["iv"].mean().sort_index()
+            iv_series_ens  = iv_by_dte.values.astype(float)
+            lam_series_ens = np.linspace(float(lam_arr[-1]) if len(lam_arr) else mu_h,
+                                         mu_h, len(iv_series_ens))
 
-    # ── Optimal stopping summary ───────────────────────────────────────────────
-    st.markdown("#### Optimal Stopping Summary")
-    st.markdown(f"""
-    <div style='background:#161C2D;border:1px solid #1E2740;border-radius:10px;padding:18px;'>
-      <table style='width:100%;color:#E8EDF5;font-size:0.88rem;'>
-        <tr><td style='color:#5A6478;'>Stopping time τ*</td>
-            <td>inf{{t : Z_short(t) > {gamma_thresh}}}</td></tr>
-        <tr><td style='color:#5A6478;'>Current Z_short(t)</td>
-            <td style='color:{"#D50000" if firing else "#E8EDF5"};font-weight:700;'>{z_current:.4f}</td></tr>
-        <tr><td style='color:#5A6478;'>Threshold Γ</td>
-            <td>{gamma_thresh:.3f}</td></tr>
-        <tr><td style='color:#5A6478;'>Signal firing?</td>
-            <td style='color:{"#D50000" if firing else "#00C853"};font-weight:700;'>{"YES — Enter position" if firing else "NO — Continue monitoring"}</td></tr>
-        <tr><td style='color:#5A6478;'>Position size f*(t)</td>
-            <td><b>{f_star:.1%}</b> of portfolio notional</td></tr>
-        <tr><td style='color:#5A6478;'>Circuit breaker</td>
-            <td style='color:{"#D50000" if kelly.circuit_open else "#00C853"};'>{"OPEN — trading halted" if kelly.circuit_open else "CLOSED — normal"}</td></tr>
-        <tr><td style='color:#5A6478;'>Branching ratio n</td>
-            <td>{mu_h:.2f} / {beta_h:.2f} = {alpha_h/beta_h:.3f}
-            {"[Near-critical]" if alpha_h/beta_h > 0.8 else "[Stationary]"}</td></tr>
-      </table>
-    </div>
-    """, unsafe_allow_html=True)
+    if len(iv_series_ens) < 4:
+        # Fallback: use synthetic IV from σ(t) path
+        iv_series_ens  = sigma_path if len(sigma_path) >= 4 else np.full(10, atm_iv)
+        lam_series_ens = lam_arr[:len(iv_series_ens)] if len(lam_arr) >= len(iv_series_ens) \
+                         else np.full(len(iv_series_ens), mu_h)
 
-    st.markdown("""
-    <div style='margin-top:12px;color:#5A6478;font-size:0.75rem;'>
-    <b>Research purposes only.</b> This tool validates the ERCA signal detection mechanism
-    (Spearman ρ=0.4773, p&lt;0.0001 on 500 S&P 500 events). Full monetisation requires
-    historical IV data from a paid options feed. Not investment advice.
+    ens = ERCAEnsemble(seed=42)
+    ens_result = ens.run_on_series(iv_series_ens, lam_series_ens)
+
+    preds_arr   = ens_result["preds_arr"]         # (T, 4)
+    selections  = ens_result["selections"]        # (T,)
+    ens_pred    = ens_result["ensemble_pred"]     # (T,)
+    dqn_dist    = ens_result["dqn_dist"]          # (4,)
+    dqn_losses  = ens_result["dqn_losses"]
+
+    MODEL_COLORS = ["#00D4FF", "#7B61FF", "#FFB300", "#00C853"]
+
+    pd1, pd2 = st.columns([2, 1])
+    with pd1:
+        st.markdown("**Four model IV predictions vs realised  (DQN selects)**")
+        fig_ens = go.Figure()
+        fig_ens.add_trace(go.Scatter(
+            x=np.arange(len(iv_series_ens)), y=iv_series_ens * 100,
+            mode="lines+markers", name="Realised IV",
+            line=dict(color="#E8EDF5", width=2.5),
+            marker=dict(size=5)))
+        for m, (mname, mcol) in enumerate(zip(MODEL_NAMES, MODEL_COLORS)):
+            fig_ens.add_trace(go.Scatter(
+                x=np.arange(len(preds_arr)), y=preds_arr[:, m] * 100,
+                mode="lines", name=mname,
+                line=dict(color=mcol, width=1.5, dash="dot")))
+        # Highlight DQN-selected predictions
+        fig_ens.add_trace(go.Scatter(
+            x=np.arange(len(ens_pred)), y=ens_pred * 100,
+            mode="markers", name="DQN selected",
+            marker=dict(
+                color=[MODEL_COLORS[s] for s in selections],
+                size=9, symbol="diamond",
+                line=dict(color="#0E1117", width=0.5))))
+        fig_ens.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=300, margin=dict(l=0,r=0,t=10,b=0),
+            xaxis_title="Expiry index (by DTE)", yaxis_title="IV (%)",
+            legend=dict(orientation="h", y=1.12, font=dict(size=9)),
+            xaxis=dict(gridcolor="#1E2740"), yaxis=dict(gridcolor="#1E2740"))
+        st.plotly_chart(fig_ens, use_container_width=True)
+
+        # DQN TD loss convergence
+        if len(dqn_losses) > 2:
+            fig_loss = go.Figure(go.Scatter(
+                x=np.arange(len(dqn_losses)), y=dqn_losses,
+                mode="lines", line=dict(color="#D50000", width=1.5),
+                fill="tozeroy", fillcolor="rgba(213,0,0,0.07)"))
+            fig_loss.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+                plot_bgcolor="#0E1117", height=120, margin=dict(l=0,r=0,t=20,b=0),
+                title=dict(text="DQN TD-loss (replay buffer)", font=dict(size=11, color="#5A6478")),
+                xaxis=dict(gridcolor="#1E2740", showticklabels=False),
+                yaxis=dict(gridcolor="#1E2740", title="Loss"))
+            st.plotly_chart(fig_loss, use_container_width=True)
+
+    with pd2:
+        st.markdown("**DQN model selection distribution**")
+        fig_dqn = go.Figure(go.Bar(
+            x=MODEL_NAMES, y=dqn_dist * 100,
+            marker_color=MODEL_COLORS,
+            text=[f"{d:.0%}" for d in dqn_dist],
+            textposition="outside"))
+        fig_dqn.update_layout(template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=200, margin=dict(l=0,r=0,t=10,b=40),
+            yaxis=dict(title="%", gridcolor="#1E2740", range=[0, 100]),
+            xaxis=dict(tickangle=-25, gridcolor="#0E1117"), showlegend=False)
+        st.plotly_chart(fig_dqn, use_container_width=True)
+
+        # Optimal stopping + Kelly execution
+        st.markdown(f"""<div style='background:#161C2D;border:1px solid #1E2740;
+            border-radius:10px;padding:14px;font-size:0.82rem;margin-top:8px;'>
+          <table style='width:100%;color:#E8EDF5;'>
+            <tr><td style='color:#5A6478;padding:3px 0;'>τ* condition</td>
+                <td style='text-align:right;'>Z_short &gt; {gamma_thresh:.3f}</td></tr>
+            <tr><td style='color:#5A6478;padding:3px 0;'>Signal</td>
+                <td style='text-align:right;color:{"#D50000" if firing else "#00C853"};
+                font-weight:700;'>{"FIRE" if firing else "HOLD"}</td></tr>
+            <tr><td style='color:#5A6478;padding:3px 0;'>f*(t) Kelly</td>
+                <td style='text-align:right;'><b>{f_star:.1%}</b></td></tr>
+            <tr><td style='color:#5A6478;padding:3px 0;'>Circuit breaker</td>
+                <td style='text-align:right;color:{"#D50000" if kelly.circuit_open else "#00C853"};'>
+                {"OPEN" if kelly.circuit_open else "closed"}</td></tr>
+            <tr><td style='color:#5A6478;padding:3px 0;'>DQN best model</td>
+                <td style='text-align:right;'><b>{MODEL_NAMES[int(np.argmax(dqn_dist))]}</b></td></tr>
+          </table>
+        </div>""", unsafe_allow_html=True)
+
+        # MC straddle price
+        straddle = sde_obj.price_straddle(
+            S0=price, K=price, T=1/252,
+            lambda_soc=float(lam_arr[-1]) if len(lam_arr) else mu_h,
+            S_soc=S_soc_agg, S_off=S_off_avg, n_paths=2000, seed=0)
+        st.markdown(f"""<div style='background:#161C2D;border:1px solid #1E2740;
+            border-radius:10px;padding:14px;font-size:0.82rem;margin-top:8px;'>
+          <div style='color:#5A6478;font-size:0.72rem;margin-bottom:6px;'>
+            0DTE STRADDLE — MC pricing under Q (2 000 paths)</div>
+          <table style='width:100%;color:#E8EDF5;'>
+            <tr><td style='color:#5A6478;'>Short call premium</td>
+                <td style='text-align:right;'>${straddle["call"]:.3f}</td></tr>
+            <tr><td style='color:#5A6478;'>Short put premium</td>
+                <td style='text-align:right;'>${straddle["put"]:.3f}</td></tr>
+            <tr><td style='color:#5A6478;font-weight:700;'>Short straddle credit</td>
+                <td style='text-align:right;color:#00C853;font-weight:700;'>
+                ${straddle["straddle"]:.3f}</td></tr>
+            <tr><td style='color:#5A6478;'>σ used</td>
+                <td style='text-align:right;'>{straddle["sigma_used"]*100:.1f}%</td></tr>
+          </table>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("""<div style='margin-top:14px;color:#5A6478;font-size:0.73rem;'>
+    <b>Research purposes only.</b> Spearman ρ=0.4773, p&lt;0.0001 on 500 S&amp;P 500 events.
+    Full production deployment requires OPRA tick feed + Bloomberg BLPAPI.
+    Not investment advice.
     </div>""", unsafe_allow_html=True)
 
 
