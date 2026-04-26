@@ -112,8 +112,7 @@ def get_stock_info(ticker: str) -> dict:
 def get_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
     """OHLCV history."""
     try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True,
-                         session=_yf_session())
+        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         return df
     except Exception:
