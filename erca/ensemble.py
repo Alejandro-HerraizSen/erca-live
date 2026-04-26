@@ -320,3 +320,99 @@ class ERCAEnsemble:
             "dqn_dist":       self.dqn.selection_dist,
             "dqn_losses":     np.array(self.dqn._losses) if self.dqn._losses else np.zeros(1),
         }
+
+    # ── Multi-epoch training with metric collection ────────────────────────
+    def train_and_evaluate(
+        self,
+        train_iv: np.ndarray,
+        test_iv:  np.ndarray,
+        train_lam: np.ndarray,
+        test_lam:  np.ndarray,
+        n_epochs: int = 5,
+    ) -> dict:
+        """
+        Train the DQN ensemble for n_epochs passes over training data.
+        Evaluate on held-out test set before and after training.
+        Returns comprehensive training metrics for visualisation.
+        """
+        # ── Pre-training snapshot on test set ──────────────────────────────
+        pre_ens = ERCAEnsemble(seed=99)  # fresh, untrained
+        pre_res = pre_ens.run_on_series(test_iv, test_lam)
+        pre_preds = pre_res["preds_arr"]   # (T_test, 4)
+        n_pre     = min(len(pre_preds), len(test_iv) - 1)
+        pre_rmse  = np.sqrt(np.mean((pre_preds[:n_pre] - test_iv[1:n_pre+1, None])**2, axis=0))
+
+        # ── Multi-epoch training ────────────────────────────────────────────
+        epoch_losses: List[np.ndarray] = []
+        epoch_dists:  List[np.ndarray] = []
+        epoch_rmse:   List[np.ndarray] = []   # per-model RMSE on training data
+
+        for epoch in range(n_epochs):
+            self._iv_buf.clear(); self._preds_log.clear()
+            self._sel_log.clear(); self._rew_log.clear()
+            self._lam_log.clear(); self._last_preds = None
+
+            step_losses_ep: List[float] = []
+            for iv, lam in zip(train_iv, train_lam):
+                n_before = len(self.dqn._losses)
+                self.step(float(iv), float(lam))
+                if len(self.dqn._losses) > n_before:
+                    step_losses_ep.append(self.dqn._losses[-1])
+
+            preds_ep = np.array([s["preds"] for s in
+                                  [self.step(float(iv), float(lam))
+                                   for iv, lam in zip(train_iv, train_lam)]
+                                  ]) if epoch == 0 else np.array(self._preds_log)
+            # per-model RMSE on training data this epoch
+            target_ep = train_iv[1:len(self._preds_log)+1]
+            preds_log = np.array(self._preds_log)
+            if len(preds_log) > 0 and len(target_ep) > 0:
+                n_ = min(len(preds_log), len(target_ep))
+                ep_rmse = np.sqrt(np.mean(
+                    (preds_log[:n_] - target_ep[:n_, None])**2, axis=0))
+                epoch_rmse.append(ep_rmse)
+
+            epoch_losses.append(np.array(step_losses_ep) if step_losses_ep else np.zeros(1))
+            epoch_dists.append(self.dqn.selection_dist.copy())
+
+        # ── Post-training evaluation on test set ───────────────────────────
+        self._iv_buf.clear(); self._preds_log.clear()
+        self._sel_log.clear(); self._rew_log.clear()
+        self._lam_log.clear(); self._last_preds = None
+
+        post_steps = [self.step(float(iv), float(lam))
+                      for iv, lam in zip(test_iv, test_lam)]
+        post_preds = np.array([s["preds"] for s in post_steps])
+        post_sels  = np.array(self._sel_log)
+        post_ens_pred = post_preds[np.arange(len(post_sels)), post_sels]
+
+        target_test = test_iv[1:len(post_preds)+1]
+        n_t = min(len(post_preds), len(target_test))
+        post_rmse = np.sqrt(np.mean(
+            (post_preds[:n_t] - target_test[:n_t, None])**2, axis=0))
+        post_ens_rmse = float(np.sqrt(np.mean(
+            (post_ens_pred[:n_t] - target_test[:n_t])**2)))
+
+        # All DQN losses across all epochs
+        all_losses = np.concatenate([l for l in epoch_losses if len(l) > 0])
+
+        return {
+            # Training dynamics
+            "all_dqn_losses":   all_losses,
+            "epoch_losses":     epoch_losses,
+            "epoch_dists":      epoch_dists,          # (n_epochs, 4)
+            "epoch_rmse":       epoch_rmse,           # (n_epochs, 4)
+            # Pre/post evaluation on test set
+            "pre_rmse":         pre_rmse,             # (4,) before training
+            "post_rmse":        post_rmse,            # (4,) after training
+            "post_ens_rmse":    post_ens_rmse,
+            # Predictions on test set
+            "post_preds":       post_preds,
+            "post_selections":  post_sels,
+            "post_ens_pred":    post_ens_pred,
+            "test_iv":          test_iv,
+            # DQN internals
+            "q_weights":        self.dqn.q_snapshot,  # (4, 5)
+            "final_dist":       self.dqn.selection_dist,
+            "n_epochs":         n_epochs,
+        }

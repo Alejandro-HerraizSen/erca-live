@@ -212,7 +212,7 @@ st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Dashboard",
     "Options Chain",
     "IV Surface",
@@ -221,6 +221,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "ERCA Signal",
     "Model Explorer",
     "Backtest",
+    "Training",
 ])
 
 
@@ -1803,6 +1804,347 @@ with tab8:
             "</div>",
             unsafe_allow_html=True,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — TRAINING
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab9:
+    st.markdown("#### DQN Ensemble — Model Training")
+    st.markdown(
+        "<div style='color:#5A6478;font-size:0.82rem;margin-bottom:16px;'>"
+        "Trains all four IV predictors (Neural CDE · Multi-Transformer · "
+        "Bi-Transformer · SVR) plus the Deep Q-Network adaptive selector on "
+        "one year of real daily realised volatility. Shows learning curves, "
+        "model selection evolution, Q-value weights, and pre/post test accuracy.</div>",
+        unsafe_allow_html=True,
+    )
+
+    if price_hist.empty:
+        st.warning("Price history unavailable — cannot train.")
+    else:
+        # ── Build training dataset ─────────────────────────────────────────────
+        _close   = price_hist["Close"].squeeze().dropna()
+        _returns = _close.pct_change().dropna()
+        _rv      = (_returns.rolling(21).std() * np.sqrt(252)).dropna()
+        iv_full  = _rv.values.astype(float)
+        dates_full = _rv.index
+
+        n_train = int(len(iv_full) * 0.70)
+        train_iv   = iv_full[:n_train]
+        test_iv    = iv_full[n_train:]
+        train_dates = dates_full[:n_train]
+        test_dates  = dates_full[n_train:]
+
+        # Hawkes λ proxy: decays from current level toward μ over the series
+        mu_train = 0.10
+        train_lam = np.linspace(0.60, mu_train, len(train_iv))
+        test_lam  = np.full(len(test_iv), mu_train)
+
+        tr_col, cfg_col = st.columns([3, 1])
+        with cfg_col:
+            n_epochs = st.slider("Training epochs", 1, 10, 5, 1, key="tr_epochs")
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            st.markdown(f"""<div style='background:#161C2D;border:1px solid #1E2740;
+                border-radius:8px;padding:12px;font-size:0.82rem;'>
+              <div style='color:#5A6478;margin-bottom:6px;font-size:0.72rem;'>DATASET</div>
+              <table style='width:100%;color:#E8EDF5;'>
+                <tr><td style='color:#5A6478;'>Series</td>
+                    <td style='text-align:right;'>21-day realised vol</td></tr>
+                <tr><td style='color:#5A6478;'>Total points</td>
+                    <td style='text-align:right;'>{len(iv_full)}</td></tr>
+                <tr><td style='color:#5A6478;'>Train (70%)</td>
+                    <td style='text-align:right;color:#00D4FF;'>{n_train}</td></tr>
+                <tr><td style='color:#5A6478;'>Test  (30%)</td>
+                    <td style='text-align:right;color:#FFB300;'>{len(test_iv)}</td></tr>
+                <tr><td style='color:#5A6478;'>Vol range</td>
+                    <td style='text-align:right;'>{iv_full.min()*100:.1f}%–{iv_full.max()*100:.1f}%</td></tr>
+              </table>
+            </div>""", unsafe_allow_html=True)
+
+        with tr_col:
+            # Show full IV series with train/test split
+            fig_data = go.Figure()
+            fig_data.add_trace(go.Scatter(
+                x=train_dates, y=train_iv * 100,
+                mode="lines", name=f"Train ({n_train} days)",
+                line=dict(color="#00D4FF", width=1.8),
+                fill="tozeroy", fillcolor="rgba(0,212,255,0.08)"))
+            fig_data.add_trace(go.Scatter(
+                x=test_dates, y=test_iv * 100,
+                mode="lines", name=f"Test ({len(test_iv)} days)",
+                line=dict(color="#FFB300", width=1.8),
+                fill="tozeroy", fillcolor="rgba(255,179,0,0.08)"))
+            if len(train_dates) > 0:
+                fig_data.add_vline(x=str(train_dates[-1]),
+                    line=dict(color="#5A6478", dash="dash", width=1.5),
+                    annotation_text="Train | Test",
+                    annotation_font_color="#5A6478")
+            fig_data.update_layout(
+                template="plotly_dark", paper_bgcolor="#0E1117",
+                plot_bgcolor="#0E1117", height=200,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="", yaxis_title="Realised Vol (%)",
+                legend=dict(orientation="h", y=1.12, font=dict(size=10)),
+                xaxis=dict(gridcolor="#1E2740"), yaxis=dict(gridcolor="#1E2740"))
+            st.plotly_chart(fig_data, use_container_width=True)
+
+        # ── Run training ───────────────────────────────────────────────────────
+        with st.spinner(f"Training DQN ensemble for {n_epochs} epoch(s) on {n_train} samples…"):
+            ens_trained = ERCAEnsemble(seed=42)
+            tr_metrics  = ens_trained.train_and_evaluate(
+                train_iv=train_iv, test_iv=test_iv,
+                train_lam=train_lam, test_lam=test_lam,
+                n_epochs=n_epochs,
+            )
+
+        # ── 1. DQN learning curve ──────────────────────────────────────────────
+        st.markdown("##### DQN TD-Loss — Learning Curve")
+        lc1, lc2 = st.columns(2)
+
+        with lc1:
+            all_losses = tr_metrics["all_dqn_losses"]
+            if len(all_losses) > 2:
+                # Smooth with rolling mean
+                smooth_k  = max(len(all_losses) // 40, 3)
+                smoothed  = pd.Series(all_losses).rolling(smooth_k, min_periods=1).mean().values
+                fig_lc = go.Figure()
+                fig_lc.add_trace(go.Scatter(
+                    x=np.arange(len(all_losses)), y=all_losses,
+                    mode="lines", name="TD loss (raw)",
+                    line=dict(color="#5A6478", width=0.8), opacity=0.5))
+                fig_lc.add_trace(go.Scatter(
+                    x=np.arange(len(smoothed)), y=smoothed,
+                    mode="lines", name=f"Smoothed (k={smooth_k})",
+                    line=dict(color="#D50000", width=2)))
+                # Epoch boundaries
+                steps_per_ep = max(len(all_losses) // n_epochs, 1)
+                for ep in range(1, n_epochs):
+                    fig_lc.add_vline(x=ep * steps_per_ep,
+                        line=dict(color="#5A6478", dash="dot", width=1),
+                        annotation_text=f"ep{ep+1}",
+                        annotation_font_color="#5A6478",
+                        annotation_position="top")
+                fig_lc.update_layout(
+                    template="plotly_dark", paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117", height=260,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis_title="Training step",
+                    yaxis_title="TD error²",
+                    legend=dict(orientation="h", y=1.12, font=dict(size=10)),
+                    xaxis=dict(gridcolor="#1E2740"),
+                    yaxis=dict(gridcolor="#1E2740"))
+                st.plotly_chart(fig_lc, use_container_width=True)
+            else:
+                st.info("Not enough steps to plot loss curve.")
+
+        with lc2:
+            # Per-model RMSE per epoch
+            epoch_rmse = tr_metrics["epoch_rmse"]
+            if epoch_rmse:
+                ep_rmse_arr = np.array(epoch_rmse)  # (n_epochs, 4)
+                fig_er = go.Figure()
+                MCOLS = ["#00D4FF", "#7B61FF", "#FFB300", "#00C853"]
+                for m, (mname, mcol) in enumerate(zip(MODEL_NAMES, MCOLS)):
+                    if ep_rmse_arr.shape[0] > 0 and ep_rmse_arr.shape[1] > m:
+                        fig_er.add_trace(go.Scatter(
+                            x=np.arange(1, ep_rmse_arr.shape[0] + 1),
+                            y=ep_rmse_arr[:, m] * 100,
+                            mode="lines+markers", name=mname,
+                            line=dict(color=mcol, width=2),
+                            marker=dict(size=7)))
+                fig_er.update_layout(
+                    template="plotly_dark", paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117", height=260,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis_title="Epoch", yaxis_title="Train RMSE (vol %)",
+                    xaxis=dict(gridcolor="#1E2740", dtick=1),
+                    yaxis=dict(gridcolor="#1E2740"),
+                    legend=dict(orientation="h", y=1.12, font=dict(size=10)))
+                st.plotly_chart(fig_er, use_container_width=True)
+
+        # ── 2. Model selection evolution across epochs ─────────────────────────
+        st.markdown("##### DQN Model Selection — Distribution per Epoch")
+        epoch_dists = tr_metrics["epoch_dists"]   # list of (4,) arrays
+        if epoch_dists:
+            dist_arr = np.array(epoch_dists)       # (n_epochs, 4)
+            fig_sel = go.Figure()
+            MCOLS = ["#00D4FF", "#7B61FF", "#FFB300", "#00C853"]
+            for m, (mname, mcol) in enumerate(zip(MODEL_NAMES, MCOLS)):
+                fig_sel.add_trace(go.Bar(
+                    name=mname,
+                    x=[f"Epoch {e+1}" for e in range(len(epoch_dists))],
+                    y=dist_arr[:, m] * 100,
+                    marker_color=mcol, opacity=0.85))
+            fig_sel.update_layout(
+                template="plotly_dark", paper_bgcolor="#0E1117",
+                plot_bgcolor="#0E1117", height=240, barmode="stack",
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="Epoch",
+                yaxis_title="Selection share (%)",
+                yaxis=dict(range=[0, 100], gridcolor="#1E2740"),
+                xaxis=dict(gridcolor="#0E1117"),
+                legend=dict(orientation="h", y=1.12, font=dict(size=10)))
+            st.plotly_chart(fig_sel, use_container_width=True)
+            st.caption("Uniform at epoch 1 → DQN concentrates on best-performing model as training progresses")
+
+        # ── 3. Pre vs Post test RMSE ───────────────────────────────────────────
+        st.markdown("##### Pre-Training vs Post-Training  —  Test Set RMSE")
+        pre_rmse  = tr_metrics["pre_rmse"]   # (4,)
+        post_rmse = tr_metrics["post_rmse"]  # (4,)
+        pe1, pe2  = st.columns(2)
+
+        with pe1:
+            fig_pp = go.Figure()
+            x_labels = MODEL_NAMES + ["Ensemble"]
+            pre_all  = np.append(pre_rmse,  pre_rmse.mean())   # ensemble = mean pre
+            post_all = np.append(post_rmse, tr_metrics["post_ens_rmse"])
+
+            fig_pp.add_trace(go.Bar(
+                name="Before training", x=x_labels,
+                y=pre_all * 100,
+                marker_color="#5A6478", opacity=0.8))
+            fig_pp.add_trace(go.Bar(
+                name="After training", x=x_labels,
+                y=post_all * 100,
+                marker_color=["#00D4FF","#7B61FF","#FFB300","#00C853","#D50000"],
+                opacity=0.9))
+            fig_pp.update_layout(
+                template="plotly_dark", paper_bgcolor="#0E1117",
+                plot_bgcolor="#0E1117", height=280, barmode="group",
+                margin=dict(l=0, r=0, t=10, b=0),
+                yaxis_title="Test RMSE (vol %)",
+                yaxis=dict(gridcolor="#1E2740"),
+                xaxis=dict(tickangle=-20, gridcolor="#0E1117"),
+                legend=dict(orientation="h", y=1.12, font=dict(size=10)))
+            st.plotly_chart(fig_pp, use_container_width=True)
+
+        with pe2:
+            # Improvement table
+            st.markdown("**Per-model improvement**")
+            rows_html = ""
+            for m, mname in enumerate(MODEL_NAMES):
+                delta  = (pre_rmse[m] - post_rmse[m]) * 100
+                pct_imp = delta / (pre_rmse[m] * 100 + 1e-9) * 100
+                col = "#00C853" if delta > 0 else "#D50000"
+                rows_html += (
+                    f"<tr><td style='color:#5A6478;padding:5px 4px;'>{mname}</td>"
+                    f"<td style='text-align:right;'>{pre_rmse[m]*100:.3f}%</td>"
+                    f"<td style='text-align:right;'>{post_rmse[m]*100:.3f}%</td>"
+                    f"<td style='text-align:right;color:{col};font-weight:700;'>"
+                    f"{'↓' if delta>0 else '↑'} {abs(delta):.3f}pp</td></tr>"
+                )
+            ens_delta = (pre_rmse.mean() - tr_metrics["post_ens_rmse"]) * 100
+            ens_col = "#00C853" if ens_delta > 0 else "#D50000"
+            rows_html += (
+                f"<tr style='border-top:1px solid #1E2740;'>"
+                f"<td style='color:#E8EDF5;padding:5px 4px;font-weight:700;'>Ensemble</td>"
+                f"<td style='text-align:right;'>{pre_rmse.mean()*100:.3f}%</td>"
+                f"<td style='text-align:right;'>{tr_metrics['post_ens_rmse']*100:.3f}%</td>"
+                f"<td style='text-align:right;color:{ens_col};font-weight:700;'>"
+                f"{'↓' if ens_delta>0 else '↑'} {abs(ens_delta):.3f}pp</td></tr>"
+            )
+            st.markdown(f"""<div style='background:#161C2D;border:1px solid #1E2740;
+                border-radius:10px;padding:14px;'>
+              <table style='width:100%;color:#E8EDF5;font-size:0.82rem;'>
+                <tr><th style='color:#5A6478;text-align:left;padding-bottom:6px;'>Model</th>
+                    <th style='color:#5A6478;text-align:right;'>Before</th>
+                    <th style='color:#5A6478;text-align:right;'>After</th>
+                    <th style='color:#5A6478;text-align:right;'>Δ</th></tr>
+                {rows_html}
+              </table>
+            </div>""", unsafe_allow_html=True)
+
+        # ── 4. Test-set predictions ────────────────────────────────────────────
+        st.markdown("##### Test Set — Ensemble Predictions vs Realised Vol")
+        post_preds = tr_metrics["post_preds"]
+        post_sels  = tr_metrics["post_selections"]
+        post_ens_p = tr_metrics["post_ens_pred"]
+        n_show     = min(len(post_ens_p), len(test_iv) - 1)
+
+        if n_show > 1:
+            MCOLS = ["#00D4FF", "#7B61FF", "#FFB300", "#00C853"]
+            fig_test = go.Figure()
+            fig_test.add_trace(go.Scatter(
+                x=np.arange(n_show),
+                y=test_iv[1:n_show+1] * 100,
+                mode="lines", name="Realised IV",
+                line=dict(color="#E8EDF5", width=2.5)))
+            for m, (mname, mcol) in enumerate(zip(MODEL_NAMES, MCOLS)):
+                fig_test.add_trace(go.Scatter(
+                    x=np.arange(n_show),
+                    y=post_preds[:n_show, m] * 100,
+                    mode="lines", name=mname,
+                    line=dict(color=mcol, width=1.2, dash="dot")))
+            fig_test.add_trace(go.Scatter(
+                x=np.arange(n_show),
+                y=post_ens_p[:n_show] * 100,
+                mode="markers", name="DQN selected",
+                marker=dict(
+                    color=[MCOLS[s] for s in post_sels[:n_show]],
+                    size=8, symbol="diamond",
+                    line=dict(color="#0E1117", width=0.5))))
+            fig_test.update_layout(
+                template="plotly_dark", paper_bgcolor="#0E1117",
+                plot_bgcolor="#0E1117", height=280,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="Test day", yaxis_title="Vol (%)",
+                legend=dict(orientation="h", y=1.12, font=dict(size=9)),
+                xaxis=dict(gridcolor="#1E2740"),
+                yaxis=dict(gridcolor="#1E2740"))
+            st.plotly_chart(fig_test, use_container_width=True)
+
+        # ── 5. DQN Q-value weight heatmap ─────────────────────────────────────
+        st.markdown("##### Trained DQN — Q-Value Weight Matrix  W[action, state feature]")
+        q_w = tr_metrics["q_weights"]   # (4, 5)
+        state_labels = ["σ̂ CDE", "σ̂ Multi", "σ̂ Bi", "σ̂ SVR", "λ_soc"]
+
+        fig_q = go.Figure(go.Heatmap(
+            z=q_w,
+            x=state_labels,
+            y=MODEL_NAMES,
+            colorscale="RdBu",
+            zmid=0,
+            text=np.round(q_w, 4),
+            texttemplate="%{text}",
+            colorbar=dict(title="W", thickness=14),
+            hoverongaps=False,
+        ))
+        fig_q.update_layout(
+            template="plotly_dark", paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117", height=240,
+            margin=dict(l=0, r=0, t=10, b=0),
+            xaxis_title="State feature",
+            yaxis_title="Action (model)",
+            font=dict(size=11))
+        st.plotly_chart(fig_q, use_container_width=True)
+        st.caption(
+            "Q(s,a) = W_a · s   (linear approximation).  "
+            "Positive W = feature predicts this model performs well.  "
+            "Negative W = feature predicts this model underperforms."
+        )
+
+        # ── 6. Final model selection distribution ─────────────────────────────
+        final_dist = tr_metrics["final_dist"]
+        winner_idx = int(np.argmax(final_dist))
+        st.markdown(f"""<div style='background:#161C2D;border:1px solid #1E2740;
+            border-radius:10px;padding:14px;margin-top:8px;font-size:0.82rem;'>
+          <b style='color:#E8EDF5;'>Training Summary</b>
+          <table style='width:100%;color:#E8EDF5;margin-top:8px;'>
+            <tr><td style='color:#5A6478;'>Epochs completed</td>
+                <td>{tr_metrics['n_epochs']}</td>
+                <td style='color:#5A6478;'>DQN updates</td>
+                <td>{len(tr_metrics['all_dqn_losses'])}</td></tr>
+            <tr><td style='color:#5A6478;'>DQN preferred model</td>
+                <td colspan='3'><b style='color:#00D4FF;'>{MODEL_NAMES[winner_idx]}</b>
+                &nbsp; ({final_dist[winner_idx]:.1%} of selections)</td></tr>
+            <tr><td style='color:#5A6478;'>Post-train test RMSE</td>
+                <td colspan='3'><b>{tr_metrics['post_ens_rmse']*100:.4f}%</b>
+                &nbsp; (ensemble) &nbsp; vs &nbsp;
+                {tr_metrics['pre_rmse'].mean()*100:.4f}% (untrained)</td></tr>
+          </table>
+        </div>""", unsafe_allow_html=True)
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
