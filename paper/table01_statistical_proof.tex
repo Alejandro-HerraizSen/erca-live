@@ -1,0 +1,21 @@
+% Table 1 — Statistical Proof of Signal Detection Mechanism
+\begin{table}[htbp]
+\centering
+\caption{Empirical Validation of the ERCA Signal Detection Mechanism}
+\label{tab:proof}
+\begin{tabular}{lcc}
+\toprule
+Metric & Value & Note \\
+\midrule
+Sample size (earnings events) & 500 & Real S\&P 500 data \\
+Spearman $\rho$ ($Z_{short}$ vs $|\text{surprise}|$) & 0.4773 & $p < 0.0001$ \checkmark \\
+Pearson $r$ ($Z_{short}$ vs $|\text{surprise}|$) & 0.0393 & $p = 3.81e-01$ \\
+Mean $Z_{{short}}$ — top-quartile surprise ($\geq$20.8\%) & 41.529 &  \\
+Mean $Z_{{short}}$ — remaining events & 16.568 &  \\
+Ratio (top-quartile / rest) & 2.51$\times$ &  \\
+$t$-statistic (independent samples $t$-test) & 10.976 & $p = 2.99e-25$ \checkmark \\
+Signal rate ($\Gamma_{{thresh}} = 0.50$) & 80.0% &  \\
+Suggested $\Gamma_{{thresh}}$ ($p_{{80}}$ walk-forward) & 46.42 & See \S10.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
